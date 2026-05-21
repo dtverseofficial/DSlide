@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Editable AI Ink</title>
+
+<style>
+*{box-sizing:border-box}
+body{
+  margin:0;
+  font-family:Arial;
+  background:#0f172a;
+  color:white;
+  overflow:hidden;
+}
+.bar{
+  height:70px;
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:10px;
+  background:#111827;
+  overflow-x:auto;
+}
+button,input{
+  border:0;
+  border-radius:14px;
+  padding:10px 14px;
+  font-weight:700;
+}
+button{background:#38bdf8;color:#00111a}
+button.active{background:#facc15}
+button.dark{background:#334155;color:white}
+button.danger{background:#fb7185;color:white}
+canvas{
+  display:block;
+  background:white;
+  touch-action:none;
+}
+</style>
+</head>
+
+<body>
+
+<div class="bar">
+  <button id="penBtn" class="active" onclick="setTool('pen')">✍️ Pen</button>
+  <button id="eraserBtn" onclick="setTool('eraser')">🧽 Eraser</button>
+  <button onclick="toggleBeautify()" class="dark">✨ Auto: <span id="autoText">ON</span></button>
+  <button onclick="undo()" class="dark">Undo</button>
+  <button onclick="saveNote()" class="dark">Save</button>
+  <button onclick="loadNote()" class="dark">Load</button>
+  <button onclick="exportPNG()">Export</button>
+  <button onclick="clearAll()" class="danger">Clear</button>
+  <label>Size <input id="size" type="range" min="1" max="10" value="3"></label>
+</div>
+
+<canvas id="canvas"></canvas>
+
+<script>
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const sizeInput = document.getElementById("size");
+
+let strokes = [];
+let currentStroke = [];
+let drawing = false;
+let tool = "pen";
+let autoBeautify = true;
+
+function resize(){
+  canvas.width = innerWidth;
+  canvas.height = innerHeight - 70;
+  redraw();
+}
+window.onresize = resize;
+resize();
+
+function setTool(t){
+  tool = t;
+  document.getElementById("penBtn").classList.toggle("active", t==="pen");
+  document.getElementById("eraserBtn").classList.toggle("active", t==="eraser");
+}
+
+function toggleBeautify(){
+  autoBeautify = !autoBeautify;
+  document.getElementById("autoText").innerText = autoBeautify ? "ON" : "OFF";
+}
+
+function getPoint(e){
+  const r = canvas.getBoundingClientRect();
+  return {
+    x:e.clientX - r.left,
+    y:e.clientY - r.top,
+    p:e.pressure || 0.55,
+    s:+sizeInput.value
+  };
+}
+
+function isPenButton(e){
+  // Works on many stylus/browser combinations, not all.
+  return e.pointerType === "pen" && (e.button === 5 || e.buttons === 32 || e.buttons === 33);
+}
+
+canvas.onpointerdown = e => {
+  if(isPenButton(e)){
+    tool = "eraser";
+  }
+
+  const pt = getPoint(e);
+
+  if(tool === "eraser"){
+    eraseAt(pt.x, pt.y);
+    return;
+  }
+
+  drawing = true;
+  currentStroke = [pt];
+  canvas.setPointerCapture(e.pointerId);
+};
+
+canvas.onpointermove = e => {
+  const pt = getPoint(e);
+
+  if(tool === "eraser" || isPenButton(e)){
+    eraseAt(pt.x, pt.y);
+    return;
+  }
+
+  if(!drawing) return;
+
+  const last = currentStroke[currentStroke.length-1];
+  if(Math.hypot(pt.x-last.x, pt.y-last.y) < 1.2) return;
+
+  currentStroke.push(pt);
+  redraw();
+  drawStroke(currentStroke);
+};
+
+canvas.onpointerup = () => {
+  if(currentStroke.length > 1){
+    let finalStroke = autoBeautify ? beautifyStroke(currentStroke) : currentStroke;
+    strokes.push(finalStroke);
+  }
+  currentStroke = [];
+  drawing = false;
+  redraw();
+};
+
+function drawGrid(){
+  ctx.strokeStyle = "#eef2f7";
+  ctx.lineWidth = 1;
+
+  for(let y=40;y<canvas.height;y+=40){
+    ctx.beginPath();
+    ctx.moveTo(0,y);
+    ctx.lineTo(canvas.width,y);
+    ctx.stroke();
+  }
+}
+
+function drawStroke(s){
+  if(s.length < 2) return;
+
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = "#0f172a";
+  ctx.lineWidth = avgSize(s);
+
+  ctx.beginPath();
+  ctx.moveTo(s[0].x, s[0].y);
+
+  for(let i=1;i<s.length-2;i++){
+    const midX = (s[i].x + s[i+1].x)/2;
+    const midY = (s[i].y + s[i+1].y)/2;
+    ctx.quadraticCurveTo(s[i].x, s[i].y, midX, midY);
+  }
+
+  const last = s[s.length-1];
+  ctx.lineTo(last.x,last.y);
+  ctx.stroke();
+}
+
+function avgSize(s){
+  let total = 0;
+  for(const p of s) total += p.s * (0.65 + p.p);
+  return Math.max(2, total / s.length);
+}
+
+function redraw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle = "white";
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  drawGrid();
+  strokes.forEach(drawStroke);
+}
+
+function beautifyStroke(stroke){
+  let s = [...stroke];
+
+  s = removeJitter(s);
+  s = resample(s, 3);
+
+  for(let i=0;i<6;i++){
+    s = smooth(s, 5);
+  }
+
+  s = straightenIfLine(s);
+  s = normalizeSize(s);
+
+  return s;
+}
+
+function removeJitter(s){
+  let out = [s[0]];
+
+  for(let i=1;i<s.length;i++){
+    const a = out[out.length-1];
+    const b = s[i];
+    if(Math.hypot(b.x-a.x,b.y-a.y) > 1.5){
+      out.push(b);
+    }
+  }
+
+  return out;
+}
+
+function resample(s, gap){
+  let out = [s[0]];
+
+  for(let i=1;i<s.length;i++){
+    const a = out[out.length-1];
+    const b = s[i];
+    const d = Math.hypot(b.x-a.x,b.y-a.y);
+
+    if(d >= gap){
+      out.push(b);
+    }
+  }
+
+  return out;
+}
+
+function smooth(s, power){
+  if(s.length < 3) return s;
+
+  let out = [s[0]];
+
+  for(let i=1;i<s.length-1;i++){
+    const a=s[i-1], b=s[i], c=s[i+1];
+
+    out.push({
+      x:(a.x + b.x*power + c.x)/(power+2),
+      y:(a.y + b.y*power + c.y)/(power+2),
+      p:b.p,
+      s:b.s
+    });
+  }
+
+  out.push(s[s.length-1]);
+  return out;
+}
+
+function straightenIfLine(s){
+  if(s.length < 4) return s;
+
+  const first = s[0];
+  const last = s[s.length-1];
+  const length = Math.hypot(last.x-first.x,last.y-first.y);
+
+  if(length < 35) return s;
+
+  let maxDev = 0;
+
+  for(const p of s){
+    maxDev = Math.max(maxDev, distanceToLine(p, first, last));
+  }
+
+  if(maxDev < 9){
+    return [first,last];
+  }
+
+  return s;
+}
+
+function distanceToLine(p,a,b){
+  const A=p.x-a.x;
+  const B=p.y-a.y;
+  const C=b.x-a.x;
+  const D=b.y-a.y;
+
+  const dot=A*C+B*D;
+  const len=C*C+D*D;
+  const t=Math.max(0,Math.min(1,dot/len));
+
+  const x=a.x+t*C;
+  const y=a.y+t*D;
+
+  return Math.hypot(p.x-x,p.y-y);
+}
+
+function normalizeSize(s){
+  return s.map(p=>({
+    x:p.x,
+    y:p.y,
+    p:0.7,
+    s:Math.max(2.4, Math.min(4.2, p.s))
+  }));
+}
+
+function eraseAt(x,y){
+  const radius = 18;
+
+  strokes = strokes.filter(stroke=>{
+    for(const p of stroke){
+      if(Math.hypot(p.x-x,p.y-y) < radius){
+        return false;
+      }
+    }
+    return true;
+  });
+
+  redraw();
+
+  ctx.beginPath();
+  ctx.arc(x,y,radius,0,Math.PI*2);
+  ctx.strokeStyle="#fb7185";
+  ctx.lineWidth=2;
+  ctx.stroke();
+}
+
+function undo(){
+  strokes.pop();
+  redraw();
+}
+
+function saveNote(){
+  localStorage.setItem("editable-ai-ink", JSON.stringify(strokes));
+  alert("Saved");
+}
+
+function loadNote(){
+  const data = localStorage.getItem("editable-ai-ink");
+  if(data){
+    strokes = JSON.parse(data);
+    redraw();
+  }
+}
+
+function clearAll(){
+  if(confirm("Clear everything?")){
+    strokes = [];
+    redraw();
+  }
+}
+
+function exportPNG(){
+  redraw();
+
+  const a = document.createElement("a");
+  a.download = "editable-ai-note.png";
+  a.href = canvas.toDataURL("image/png");
+  a.click();
+}
+</script>
+
+</body>
+</html>
